@@ -26,6 +26,7 @@ import (
 var (
 	verbose = flag.Bool("v", false, "verbose")
 	tags    = flag.String("tags", "", "comma-separated list of build tags to apply when parsing")
+	noRecurse = flag.Bool("no-recurse", false, "disable recursive directory walking")
 	tagList = []string{} // exploded version of tags flag; set in main
 )
 
@@ -237,7 +238,11 @@ func main() {
 	}
 	if dirsRun {
 		for _, name := range flag.Args() {
-			walkDir(name)
+			if *noRecurse {
+				doPackageDir(name)
+			} else {
+				walkDir(name)
+			}
 		}
 		os.Exit(exitCode)
 	}
