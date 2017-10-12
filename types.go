@@ -8,38 +8,31 @@ package main
 
 import (
 	"go/ast"
-	"go/build"
 	"go/importer"
 	"go/token"
 	"go/types"
 )
 
 // stdImporter is the importer we use to import packages.
-// It is shared so that all packages are imported by the same importer.
-var stdImporter types.Importer
+// It is created during initialization so that all packages
+// are imported by the same importer.
+var stdImporter = importer.Default()
 
 var (
-	errorType        *types.Interface
-	stringerType     *types.Interface // possibly nil
-	formatterType    *types.Interface // possibly nil
-	httpResponseType types.Type       // possibly nil
-	httpClientType   types.Type       // possibly nil
+	errorType     *types.Interface
+	stringerType  *types.Interface // possibly nil
+	formatterType *types.Interface // possibly nil
 )
 
-func inittypes() {
+func init() {
 	errorType = types.Universe.Lookup("error").Type().Underlying().(*types.Interface)
 
 	if typ := importType("fmt", "Stringer"); typ != nil {
 		stringerType = typ.Underlying().(*types.Interface)
 	}
+
 	if typ := importType("fmt", "Formatter"); typ != nil {
 		formatterType = typ.Underlying().(*types.Interface)
-	}
-	if typ := importType("net/http", "Response"); typ != nil {
-		httpResponseType = typ
-	}
-	if typ := importType("net/http", "Client"); typ != nil {
-		httpClientType = typ
 	}
 }
 
@@ -61,14 +54,6 @@ func importType(path, name string) types.Type {
 }
 
 func (pkg *Package) check(fs *token.FileSet, astFiles []*ast.File) error {
-	if stdImporter == nil {
-		if *source {
-			stdImporter = importer.For("source", nil)
-		} else {
-			stdImporter = importer.Default()
-		}
-		inittypes()
-	}
 	pkg.defs = make(map[*ast.Ident]types.Object)
 	pkg.uses = make(map[*ast.Ident]types.Object)
 	pkg.selectors = make(map[*ast.SelectorExpr]*types.Selection)
@@ -81,8 +66,6 @@ func (pkg *Package) check(fs *token.FileSet, astFiles []*ast.File) error {
 		// By providing a Config with our own error function, it will continue
 		// past the first error. There is no need for that function to do anything.
 		Error: func(error) {},
-
-		Sizes: archSizes,
 	}
 	info := &types.Info{
 		Selections: pkg.selectors,
@@ -130,12 +113,15 @@ func (f *File) matchArgTypeInternal(t printfArgType, typ types.Type, arg ast.Exp
 		}
 	}
 	// If the type implements fmt.Formatter, we have nothing to check.
-	if f.isFormatter(typ) {
+	// formatterTyp may be nil - be conservative and check for Format method in that case.
+	if formatterType != nil && types.Implements(typ, formatterType) || f.hasMethod(typ, "Format") {
 		return true
 	}
 	// If we can use a string, might arg (dynamically) implement the Stringer or Error interface?
-	if t&argString != 0 && isConvertibleToString(typ) {
-		return true
+	if t&argString != 0 {
+		if types.AssertableTo(errorType, typ) || stringerType != nil && types.AssertableTo(stringerType, typ) {
+			return true
+		}
 	}
 
 	typ = typ.Underlying()
@@ -199,10 +185,13 @@ func (f *File) matchArgTypeInternal(t printfArgType, typ types.Type, arg ast.Exp
 		return f.matchStructArgType(t, typ, arg, inProgress)
 
 	case *types.Interface:
-		// There's little we can do.
-		// Whether any particular verb is valid depends on the argument.
-		// The user may have reasonable prior knowledge of the contents of the interface.
-		return true
+		// If the static type of the argument is empty interface, there's little we can do.
+		// Example:
+		//	func f(x interface{}) { fmt.Printf("%s", x) }
+		// Whether x is valid for %s depends on the type of the argument to f. One day
+		// we will be able to do better. For now, we assume that empty interface is OK
+		// but non-empty interfaces, with Stringer and Error handled above, are errors.
+		return typ.NumMethods() == 0
 
 	case *types.Basic:
 		switch typ.Kind() {
@@ -259,10 +248,6 @@ func (f *File) matchArgTypeInternal(t printfArgType, typ types.Type, arg ast.Exp
 	return false
 }
 
-func isConvertibleToString(typ types.Type) bool {
-	return types.AssertableTo(errorType, typ) || stringerType != nil && types.AssertableTo(stringerType, typ)
-}
-
 // hasBasicType reports whether x's type is a types.Basic with the given kind.
 func (f *File) hasBasicType(x ast.Expr, kind types.BasicKind) bool {
 	t := f.pkg.types[x].Type
@@ -277,12 +262,7 @@ func (f *File) hasBasicType(x ast.Expr, kind types.BasicKind) bool {
 // type. For instance, with "%d" all the elements must be printable with the "%d" format.
 func (f *File) matchStructArgType(t printfArgType, typ *types.Struct, arg ast.Expr, inProgress map[types.Type]bool) bool {
 	for i := 0; i < typ.NumFields(); i++ {
-		typf := typ.Field(i)
-		if !f.matchArgTypeInternal(t, typf.Type(), arg, inProgress) {
-			return false
-		}
-		if t&argString != 0 && !typf.Exported() && isConvertibleToString(typf.Type()) {
-			// Issue #17798: unexported Stringer or error cannot be properly fomatted.
+		if !f.matchArgTypeInternal(t, typ.Field(i).Type(), arg, inProgress) {
 			return false
 		}
 	}
@@ -299,5 +279,3 @@ func (f *File) hasMethod(typ types.Type, name string) bool {
 	_, ok := obj.(*types.Func)
 	return ok
 }
-
-var archSizes = types.SizesFor("gc", build.Default.GOARCH)

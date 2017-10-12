@@ -34,22 +34,12 @@ func checkCgoCall(f *File, node ast.Node) {
 		return
 	}
 	id, ok := sel.X.(*ast.Ident)
-	if !ok {
-		return
-	}
-
-	pkgname, ok := f.pkg.uses[id].(*types.PkgName)
-	if !ok || pkgname.Imported().Path() != "C" {
-		return
-	}
-
-	// A call to C.CBytes passes a pointer but is always safe.
-	if sel.Sel.Name == "CBytes" {
+	if !ok || id.Name != "C" {
 		return
 	}
 
 	for _, arg := range x.Args {
-		if !typeOKForCgoCall(cgoBaseType(f, arg), make(map[types.Type]bool)) {
+		if !typeOKForCgoCall(cgoBaseType(f, arg)) {
 			f.Badf(arg.Pos(), "possibly passing Go type with embedded pointer to C")
 		}
 
@@ -58,7 +48,7 @@ func checkCgoCall(f *File, node ast.Node) {
 			arg = conv.Args[0]
 		}
 		if u, ok := arg.(*ast.UnaryExpr); ok && u.Op == token.AND {
-			if !typeOKForCgoCall(cgoBaseType(f, u.X), make(map[types.Type]bool)) {
+			if !typeOKForCgoCall(cgoBaseType(f, u.X)) {
 				f.Badf(arg.Pos(), "possibly passing Go type with embedded pointer to C")
 			}
 		}
@@ -115,24 +105,23 @@ func cgoBaseType(f *File, arg ast.Expr) types.Type {
 	return f.pkg.types[arg].Type
 }
 
-// typeOKForCgoCall reports whether the type of arg is OK to pass to a
+// typeOKForCgoCall returns true if the type of arg is OK to pass to a
 // C function using cgo. This is not true for Go types with embedded
-// pointers. m is used to avoid infinite recursion on recursive types.
-func typeOKForCgoCall(t types.Type, m map[types.Type]bool) bool {
-	if t == nil || m[t] {
+// pointers.
+func typeOKForCgoCall(t types.Type) bool {
+	if t == nil {
 		return true
 	}
-	m[t] = true
 	switch t := t.Underlying().(type) {
 	case *types.Chan, *types.Map, *types.Signature, *types.Slice:
 		return false
 	case *types.Pointer:
-		return typeOKForCgoCall(t.Elem(), m)
+		return typeOKForCgoCall(t.Elem())
 	case *types.Array:
-		return typeOKForCgoCall(t.Elem(), m)
+		return typeOKForCgoCall(t.Elem())
 	case *types.Struct:
 		for i := 0; i < t.NumFields(); i++ {
-			if !typeOKForCgoCall(t.Field(i).Type(), m) {
+			if !typeOKForCgoCall(t.Field(i).Type()) {
 				return false
 			}
 		}

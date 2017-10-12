@@ -52,7 +52,6 @@ func checkBuildTag(name string, data []byte) {
 			if !bytes.Equal(fields[0], plusBuild) {
 				// Comment is something like +buildasdf not +build.
 				fmt.Fprintf(os.Stderr, "%s:%d: possible malformed +build comment\n", name, i+1)
-				setExit(1)
 				continue
 			}
 			if i >= cutoff {
@@ -69,7 +68,9 @@ func checkBuildTag(name string, data []byte) {
 						setExit(1)
 						break Args
 					}
-					elem = strings.TrimPrefix(elem, "!")
+					if strings.HasPrefix(elem, "!") {
+						elem = elem[1:]
+					}
 					for _, c := range elem {
 						if !unicode.IsLetter(c) && !unicode.IsDigit(c) && c != '_' && c != '.' {
 							fmt.Fprintf(os.Stderr, "%s:%d: invalid non-alphanumeric build constraint: %s\n", name, i+1, arg)
@@ -84,7 +85,6 @@ func checkBuildTag(name string, data []byte) {
 		// Comment with +build but not at beginning.
 		if bytes.Contains(line, plusBuild) && i < cutoff {
 			fmt.Fprintf(os.Stderr, "%s:%d: possible malformed +build comment\n", name, i+1)
-			setExit(1)
 			continue
 		}
 	}

@@ -9,32 +9,20 @@ package main
 import (
 	"errors"
 	"go/ast"
-	"go/token"
 	"reflect"
 	"strconv"
-	"strings"
 )
 
 func init() {
 	register("structtags",
 		"check that struct field tags have canonical format and apply to exported fields as needed",
-		checkStructFieldTags,
-		structType)
+		checkCanonicalFieldTag,
+		field)
 }
 
-// checkStructFieldTags checks all the field tags of a struct, including checking for duplicates.
-func checkStructFieldTags(f *File, node ast.Node) {
-	var seen map[[2]string]token.Pos
-	for _, field := range node.(*ast.StructType).Fields.List {
-		checkCanonicalFieldTag(f, field, &seen)
-	}
-}
-
-var checkTagDups = []string{"json", "xml"}
-var checkTagSpaces = map[string]bool{"json": true, "xml": true, "asn1": true}
-
-// checkCanonicalFieldTag checks a single struct field tag.
-func checkCanonicalFieldTag(f *File, field *ast.Field, seen *map[[2]string]token.Pos) {
+// checkCanonicalFieldTag checks a struct field tag.
+func checkCanonicalFieldTag(f *File, node ast.Node) {
+	field := node.(*ast.Field)
 	if field.Tag == nil {
 		return
 	}
@@ -46,49 +34,7 @@ func checkCanonicalFieldTag(f *File, field *ast.Field, seen *map[[2]string]token
 	}
 
 	if err := validateStructTag(tag); err != nil {
-		raw, _ := strconv.Unquote(field.Tag.Value) // field.Tag.Value is known to be a quoted string
-		f.Badf(field.Pos(), "struct field tag %#q not compatible with reflect.StructTag.Get: %s", raw, err)
-	}
-
-	for _, key := range checkTagDups {
-		val := reflect.StructTag(tag).Get(key)
-		if val == "" || val == "-" || val[0] == ',' {
-			continue
-		}
-		if key == "xml" && len(field.Names) > 0 && field.Names[0].Name == "XMLName" {
-			// XMLName defines the XML element name of the struct being
-			// checked. That name cannot collide with element or attribute
-			// names defined on other fields of the struct. Vet does not have a
-			// check for untagged fields of type struct defining their own name
-			// by containing a field named XMLName; see issue 18256.
-			continue
-		}
-		if i := strings.Index(val, ","); i >= 0 {
-			if key == "xml" {
-				// Use a separate namespace for XML attributes.
-				for _, opt := range strings.Split(val[i:], ",") {
-					if opt == "attr" {
-						key += " attribute" // Key is part of the error message.
-						break
-					}
-				}
-			}
-			val = val[:i]
-		}
-		if *seen == nil {
-			*seen = map[[2]string]token.Pos{}
-		}
-		if pos, ok := (*seen)[[2]string{key, val}]; ok {
-			var name string
-			if len(field.Names) > 0 {
-				name = field.Names[0].Name
-			} else {
-				name = field.Type.(*ast.Ident).Name
-			}
-			f.Badf(field.Pos(), "struct field %s repeats %s tag %q also at %s", name, key, val, f.loc(pos))
-		} else {
-			(*seen)[[2]string{key, val}] = field.Pos()
-		}
+		f.Badf(field.Pos(), "struct field tag %s not compatible with reflect.StructTag.Get: %s", field.Tag.Value, err)
 	}
 
 	// Check for use of json or xml tags with unexported fields.
@@ -103,8 +49,9 @@ func checkCanonicalFieldTag(f *File, field *ast.Field, seen *map[[2]string]token
 		return
 	}
 
+	st := reflect.StructTag(tag)
 	for _, enc := range [...]string{"json", "xml"} {
-		if reflect.StructTag(tag).Get(enc) != "" {
+		if st.Get(enc) != "" {
 			f.Badf(field.Pos(), "struct field %s has %s tag but is not exported", field.Names[0].Name, enc)
 			return
 		}
@@ -115,8 +62,6 @@ var (
 	errTagSyntax      = errors.New("bad syntax for struct tag pair")
 	errTagKeySyntax   = errors.New("bad syntax for struct tag key")
 	errTagValueSyntax = errors.New("bad syntax for struct tag value")
-	errTagValueSpace  = errors.New("suspicious space found in struct tag value")
-	errTagSpace       = errors.New("key:\"value\" pairs not separated by spaces")
 )
 
 // validateStructTag parses the struct tag and returns an error if it is not
@@ -125,13 +70,7 @@ var (
 func validateStructTag(tag string) error {
 	// This code is based on the StructTag.Get code in package reflect.
 
-	n := 0
-	for ; tag != ""; n++ {
-		if n > 0 && tag != "" && tag[0] != ' ' {
-			// More restrictive than reflect, but catches likely mistakes
-			// like `x:"foo",y:"bar"`, which parses as `x:"foo" ,y:"bar"` with second key ",y".
-			return errTagSpace
-		}
+	for tag != "" {
 		// Skip leading space.
 		i := 0
 		for i < len(tag) && tag[i] == ' ' {
@@ -159,7 +98,6 @@ func validateStructTag(tag string) error {
 		if tag[i+1] != '"' {
 			return errTagValueSyntax
 		}
-		key := tag[:i]
 		tag = tag[i+1:]
 
 		// Scan quoted string to find value.
@@ -176,50 +114,8 @@ func validateStructTag(tag string) error {
 		qvalue := tag[:i+1]
 		tag = tag[i+1:]
 
-		value, err := strconv.Unquote(qvalue)
-		if err != nil {
+		if _, err := strconv.Unquote(qvalue); err != nil {
 			return errTagValueSyntax
-		}
-
-		if !checkTagSpaces[key] {
-			continue
-		}
-
-		switch key {
-		case "xml":
-			// If the first or last character in the XML tag is a space, it is
-			// suspicious.
-			if strings.Trim(value, " ") != value {
-				return errTagValueSpace
-			}
-
-			// If there are multiple spaces, they are suspicious.
-			if strings.Count(value, " ") > 1 {
-				return errTagValueSpace
-			}
-
-			// If there is no comma, skip the rest of the checks.
-			comma := strings.IndexRune(value, ',')
-			if comma < 0 {
-				continue
-			}
-
-			// If the character before a comma is a space, this is suspicious.
-			if comma > 0 && value[comma-1] == ' ' {
-				return errTagValueSpace
-			}
-			value = value[comma+1:]
-		case "json":
-			// JSON allows using spaces in the name, so skip it.
-			comma := strings.IndexRune(value, ',')
-			if comma < 0 {
-				continue
-			}
-			value = value[comma+1:]
-		}
-
-		if strings.IndexByte(value, ' ') >= 0 {
-			return errTagValueSpace
 		}
 	}
 	return nil

@@ -23,12 +23,9 @@ import (
 	"strings"
 )
 
-// Important! If you add flags here, make sure to update cmd/go/internal/vet/vetflag.go.
-
 var (
 	verbose = flag.Bool("v", false, "verbose")
-	source  = flag.Bool("source", false, "import from source instead of compiled object files")
-	tags    = flag.String("tags", "", "space-separated list of build tags to apply when parsing")
+	tags    = flag.String("tags", "", "comma-separated list of build tags to apply when parsing")
 	tagList = []string{} // exploded version of tags flag; set in main
 )
 
@@ -136,14 +133,13 @@ var (
 	callExpr      *ast.CallExpr
 	compositeLit  *ast.CompositeLit
 	exprStmt      *ast.ExprStmt
-	forStmt       *ast.ForStmt
+	field         *ast.Field
 	funcDecl      *ast.FuncDecl
 	funcLit       *ast.FuncLit
 	genDecl       *ast.GenDecl
 	interfaceType *ast.InterfaceType
 	rangeStmt     *ast.RangeStmt
 	returnStmt    *ast.ReturnStmt
-	structType    *ast.StructType
 
 	// checkers is a two-level map.
 	// The outer level is keyed by a nil pointer, one of the AST vars above.
@@ -165,7 +161,7 @@ func register(name, usage string, fn func(*File, ast.Node), types ...ast.Node) {
 
 // Usage is a replacement usage function for the flags package.
 func Usage() {
-	fmt.Fprintf(os.Stderr, "Usage of vet:\n")
+	fmt.Fprintf(os.Stderr, "Usage of %s:\n", os.Args[0])
 	fmt.Fprintf(os.Stderr, "\tvet [flags] directory...\n")
 	fmt.Fprintf(os.Stderr, "\tvet [flags] files... # Must be a single package\n")
 	fmt.Fprintf(os.Stderr, "By default, -all is set and all non-experimental checks are run.\n")
@@ -195,9 +191,6 @@ type File struct {
 
 	// Registered checkers to run.
 	checkers map[ast.Node][]func(*File, ast.Node)
-
-	// Unreachable nodes; can be ignored in shift check.
-	dead map[ast.Node]bool
 }
 
 func main() {
@@ -215,10 +208,7 @@ func main() {
 		}
 	}
 
-	// Accept space-separated tags because that matches
-	// the go command's other subcommands.
-	// Accept commas because go tool vet traditionally has.
-	tagList = strings.Fields(strings.Replace(*tags, ",", " ", -1))
+	tagList = strings.Split(*tags, ",")
 
 	initPrintFlags()
 	initUnusedFlags()
@@ -251,7 +241,7 @@ func main() {
 		}
 		os.Exit(exitCode)
 	}
-	if doPackage(flag.Args(), nil) == nil {
+	if doPackage(".", flag.Args(), nil) == nil {
 		warnf("no files checked")
 	}
 	os.Exit(exitCode)
@@ -291,12 +281,12 @@ func doPackageDir(directory string) {
 	names = append(names, pkg.TestGoFiles...) // These are also in the "foo" package.
 	names = append(names, pkg.SFiles...)
 	prefixDirectory(directory, names)
-	basePkg := doPackage(names, nil)
+	basePkg := doPackage(directory, names, nil)
 	// Is there also a "foo_test" package? If so, do that one as well.
 	if len(pkg.XTestGoFiles) > 0 {
 		names = pkg.XTestGoFiles
 		prefixDirectory(directory, names)
-		doPackage(names, basePkg)
+		doPackage(directory, names, basePkg)
 	}
 }
 
@@ -313,7 +303,7 @@ type Package struct {
 
 // doPackage analyzes the single package constructed from the named files.
 // It returns the parsed Package or nil if none of the files have been checked.
-func doPackage(names []string, basePkg *Package) *Package {
+func doPackage(directory string, names []string, basePkg *Package) *Package {
 	var files []*File
 	var astFiles []*ast.File
 	fs := token.NewFileSet()
@@ -334,13 +324,7 @@ func doPackage(names []string, basePkg *Package) *Package {
 			}
 			astFiles = append(astFiles, parsedFile)
 		}
-		files = append(files, &File{
-			fset:    fs,
-			content: data,
-			name:    name,
-			file:    parsedFile,
-			dead:    make(map[ast.Node]bool),
-		})
+		files = append(files, &File{fset: fs, content: data, name: name, file: parsedFile})
 	}
 	if len(astFiles) == 0 {
 		return nil
@@ -350,9 +334,8 @@ func doPackage(names []string, basePkg *Package) *Package {
 	pkg.files = files
 	// Type check the package.
 	err := pkg.check(fs, astFiles)
-	if err != nil {
-		// Note that we only report this error when *verbose.
-		Println(err)
+	if err != nil && *verbose {
+		warnf("%s", err)
 	}
 
 	// Check.
@@ -457,22 +440,14 @@ func (f *File) loc(pos token.Pos) string {
 	return fmt.Sprintf("%s:%d", posn.Filename, posn.Line)
 }
 
-// locPrefix returns a formatted representation of the position for use as a line prefix.
-func (f *File) locPrefix(pos token.Pos) string {
-	if pos == token.NoPos {
-		return ""
-	}
-	return fmt.Sprintf("%s: ", f.loc(pos))
-}
-
 // Warn reports an error but does not set the exit code.
 func (f *File) Warn(pos token.Pos, args ...interface{}) {
-	fmt.Fprintf(os.Stderr, "%s%s", f.locPrefix(pos), fmt.Sprintln(args...))
+	fmt.Fprintf(os.Stderr, "%s: %s", f.loc(pos), fmt.Sprintln(args...))
 }
 
 // Warnf reports a formatted error but does not set the exit code.
 func (f *File) Warnf(pos token.Pos, format string, args ...interface{}) {
-	fmt.Fprintf(os.Stderr, "%s%s\n", f.locPrefix(pos), fmt.Sprintf(format, args...))
+	fmt.Fprintf(os.Stderr, "%s: %s\n", f.loc(pos), fmt.Sprintf(format, args...))
 }
 
 // walkFile walks the file's tree.
@@ -483,7 +458,6 @@ func (f *File) walkFile(name string, file *ast.File) {
 
 // Visit implements the ast.Visitor interface.
 func (f *File) Visit(node ast.Node) ast.Visitor {
-	f.updateDead(node)
 	var key ast.Node
 	switch node.(type) {
 	case *ast.AssignStmt:
@@ -496,8 +470,8 @@ func (f *File) Visit(node ast.Node) ast.Visitor {
 		key = compositeLit
 	case *ast.ExprStmt:
 		key = exprStmt
-	case *ast.ForStmt:
-		key = forStmt
+	case *ast.Field:
+		key = field
 	case *ast.FuncDecl:
 		key = funcDecl
 	case *ast.FuncLit:
@@ -510,8 +484,6 @@ func (f *File) Visit(node ast.Node) ast.Visitor {
 		key = rangeStmt
 	case *ast.ReturnStmt:
 		key = returnStmt
-	case *ast.StructType:
-		key = structType
 	}
 	for _, fn := range f.checkers[key] {
 		fn(f, node)
