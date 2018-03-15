@@ -7,11 +7,12 @@
 package main
 
 import (
-	"github.com/dnephin/govet/internal/whitelist"
 	"flag"
 	"go/ast"
 	"go/types"
 	"strings"
+
+	"github.com/liut0/gomultilinter-govet/internal/whitelist"
 )
 
 var compositeWhiteList = flag.Bool("compositewhitelist", true, "use composite white list; for testing only")

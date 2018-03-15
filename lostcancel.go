@@ -5,11 +5,12 @@
 package main
 
 import (
-	"github.com/dnephin/govet/internal/cfg"
 	"fmt"
 	"go/ast"
 	"go/types"
 	"strconv"
+
+	"github.com/liut0/gomultilinter-govet/internal/cfg"
 )
 
 func init() {
