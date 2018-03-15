@@ -24,10 +24,11 @@ import (
 )
 
 var (
-	verbose = flag.Bool("v", false, "verbose")
-	tags    = flag.String("tags", "", "comma-separated list of build tags to apply when parsing")
+	verboseX  = false
+	verbose   = &verboseX //flag.Bool("v", false, "verbose")
+	tags      = flag.String("tags", "", "comma-separated list of build tags to apply when parsing")
 	noRecurse = flag.Bool("no-recurse", false, "disable recursive directory walking")
-	tagList = []string{} // exploded version of tags flag; set in main
+	tagList   = []string{} // exploded version of tags flag; set in main
 )
 
 var exitCode = 0
@@ -192,6 +193,8 @@ type File struct {
 
 	// Registered checkers to run.
 	checkers map[ast.Node][]func(*File, ast.Node)
+
+	WarnOverride func(pos token.Pos, msg string)
 }
 
 func main() {
@@ -447,11 +450,20 @@ func (f *File) loc(pos token.Pos) string {
 
 // Warn reports an error but does not set the exit code.
 func (f *File) Warn(pos token.Pos, args ...interface{}) {
+	if f.WarnOverride != nil {
+		f.WarnOverride(pos, fmt.Sprintln(args...))
+		return
+	}
 	fmt.Fprintf(os.Stderr, "%s: %s", f.loc(pos), fmt.Sprintln(args...))
 }
 
 // Warnf reports a formatted error but does not set the exit code.
 func (f *File) Warnf(pos token.Pos, format string, args ...interface{}) {
+	if f.WarnOverride != nil {
+		f.WarnOverride(pos, fmt.Sprintf(format, args...))
+		return
+	}
+
 	fmt.Fprintf(os.Stderr, "%s: %s\n", f.loc(pos), fmt.Sprintf(format, args...))
 }
 
